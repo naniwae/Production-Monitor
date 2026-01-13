@@ -6,15 +6,10 @@ BASE_DIR = os.environ.get("BASE_DIR")
 #csv関連の処理
 def collect_csv_row(self):
     self.planday_num = self.planday_num if self.planday_num > 0 else 1
-    total = self.total_production - self.total_defproduction
+    rate = (self.total / self.planday_num) * 100
     ct = int(self.cycle_time) if int(self.cycle_time) > 0 else 1 
-    #ctl = ct*1.25    
-    target_progress =int(self.elapsed_seconds/ct)
     target =int(self.elapsed_seconds/ct)
-    target_progress = min(target_progress, self.planday_num)
-    diff = total - target_progress
-    rate = (total / self.planday_num) * 100
-    utilization = (total / target) * 100 if target > 0 else 0.0
+    utilization = (self.total / target) * 100 if target > 0 else 0.0
         
     row = [
         self.now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -22,10 +17,10 @@ def collect_csv_row(self):
         self.selected_line or "no_line",
         self.selected_item or "no_item",
         self.planday_num, 
-        total,
-        target_progress,
+        self.total,
+        self.progress,
         self.total_defproduction,
-        diff,
+        self.diff,
         round(rate, 2),
         round(utilization, 2),
     ]
@@ -92,7 +87,6 @@ def export_csv(self):
         # 生産開始～終了時間や累積数を補足情報として追記
         start_time = self.production_start_time or now
         total_hours = round(self.elapsed_seconds / 3600, 2)
-        total = self.total_production - self.total_defproduction
         
         writer.writerow([])
         writer.writerow(["生産開始", start_time.strftime("%Y-%m-%d %H:%M:%S")])
@@ -100,7 +94,7 @@ def export_csv(self):
         writer.writerow(["稼働時間（h）", total_hours])
         writer.writerow(["累積実績数", cumulative])
         writer.writerow(["計画数", self.plan_num])
-        writer.writerow(["残り計画数", max(self.plan_num - total, 0)])
+        writer.writerow(["残り計画数", max(self.plan_num - cumulative, 0)])
 
     self.csv_rows.clear()
     print(f"CSVファイルに追記しました: {file_path}")
