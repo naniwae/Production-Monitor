@@ -4,15 +4,21 @@ import datetime
 import os
 from gpiozero import Button
 import multiprocessing
+
+#API関係のモジュール
 from RPY_prodAPI import send_status,finish_status,send_log,product_log,finish_log
 from SecretEffect import run_emergency
 def trigger_emergency():
     p = multiprocessing.Process(target=run_emergency)
     p.start()
 
+#JSON,CSV関係のモジュール
 from RPY_Json_edit import load_line, load_plan, load_worker, load_break,save_plan,save_delay
 from RPY_prodcsv import collect_csv_row, export_csv
-    
+
+#計算ロジックのモジュール
+from RPY_logic import progress_logic
+
 #設定のファイルパス
 BASE_DIR = os.environ.get("BASE_DIR")
 if not BASE_DIR:
@@ -190,9 +196,9 @@ class ReasonDialog(wx.Dialog):
         self.manual_comment = None
 
         panel = wx.Panel(self)
-        panel.SetBackgroundColour("#1e1e2f")  # BreakSettingsDialog と同じ背景
+        panel.SetBackgroundColour("#1e1e2f")
 
-        # フォントや色の定義（BreakSettingsDialog と揃える）
+        # フォントや色の定義
         label_font = wx.Font(17, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         text_font = wx.Font(15, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         btn_font = wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
@@ -500,9 +506,11 @@ class ProductionEfficiencyApp(wx.Frame):
         #各種数値の初期設定
         self.total_production = 0
         self.total_defproduction = 0
+        self.progress = 0
+        self.diff = 0
+        self.total = 0
         self.plan_num = 0
         self.planday_num = 0
-        self.progress = 0
         #各種時間管理の初期設定
         self.total_min = 0
         self.elapsed_seconds = 0
@@ -539,7 +547,8 @@ class ProductionEfficiencyApp(wx.Frame):
         self.Centre()
         self.Show()
         self.setup_gpio()
-        
+
+    #ウィンドサイズ変更時の処理    
     def on_size(self, event):
         self.Layout()
         self.Refresh()
@@ -561,6 +570,7 @@ class ProductionEfficiencyApp(wx.Frame):
         status_panel = wx.Panel(self.panel)
         status_sizer = wx.BoxSizer(wx.VERTICAL)
         
+        #各種フォントの定義
         font = wx.Font(178, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD,False,"Arial")
        
         other_font = wx.Font(35, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
@@ -651,6 +661,7 @@ class ProductionEfficiencyApp(wx.Frame):
                 self.ltime_value.SetFont(title_font) if left[3] == "ltime" else None           
                 
         status_sizer.Add(grid_sizer, 0, wx.EXPAND | wx.ALL, 0)
+        
         # 各valueラベルの幅調整（任意）
         for value_label in [
             self.planday_value,self.total_value,self.diff_value
@@ -736,6 +747,8 @@ class ProductionEfficiencyApp(wx.Frame):
         self.btn_open_setting.SetBackgroundColour("#1869D3F6")  
         self.btn_open_setting.SetForegroundColour("#EDEDED")
     
+    #============ここからメインの各種処理=============
+    
     #テンキーの呼び出し
     def on_open_keypad(self, event):
         dlg = KeypadDialog(self)
@@ -793,18 +806,16 @@ class ProductionEfficiencyApp(wx.Frame):
     #非稼働時間の合計取得
     def break_min(self,start = False):
         if not start:
-            return
+            return 0
         
         now = datetime.datetime.now()
         today = now.weekday()
         tomorrow = (today + 1) % 7
         total_min = 0
         
-        total= self.total_production-self.total_defproduction
-        remaining=self.planday_num - total
         ct = int(self.cycle_time)
         ctr = ct*1.25   
-        worktime=(remaining*ctr)/3600
+        worktime=(self.remaining*ctr)/3600
         time_end = now + datetime.timedelta(hours=worktime)
         
         target_days = {today, tomorrow}
@@ -837,13 +848,14 @@ class ProductionEfficiencyApp(wx.Frame):
         self.production_running = True
         self.production_paused = False
         self.abnormal_pause = False
+        self.production_started = True
         #処理や各種表示用の初期値
         self.total_min = self.break_min(start=True)
         self.elapsed_seconds = 0
         self.total_production = 0
         self.total_defproduction = 0
         self.production_start_time = datetime.datetime.now()
-        self.last_csv_row_time = self.production_start_time
+        self.last_csv_collect_time = self.production_start_time
         
     #生産終了の関数    
     def end_production(self):
@@ -854,17 +866,27 @@ class ProductionEfficiencyApp(wx.Frame):
         self.production_running = False
         self.production_paused = False
         self.abnormal_pause = False
+        self.production_started = False
         #各種処理用の数値の初期化
+        #時間やタイマー関係の変数
         self.elapsed_seconds = 0
-        self.total_production = 0
-        self.total_defproduction = 0
         self.total_min = 0
         self.api_timer = 0
+        self.worktime=1
+        self.production_start_time = None
+        self.last_csv_export_time = None
+        self.collect_start_time = None
+        self.last_csv_collect_time = None
+        #生産数関係の変数
+        self.total_production = 0
+        self.total_defproduction = 0
         self.progress = 0
+        self.total = 0
+        self.diff = 0
+        #各種基本情報の初期化
         self.start_day_str = ""
         self.end_day_str = ""
         self.worker_name = ""
-        self.production_start_time = None
         self.selected_line = None
         self.selected_item = None
         self.cycle_time = 1
@@ -872,9 +894,6 @@ class ProductionEfficiencyApp(wx.Frame):
         self.planday_num = 0
         self.csv_rows.clear()
         self.log_rows.clear()
-        self.last_csv_export_time = None
-        self.collect_start_time = None
-        self.last_csv_row_time = None
         
     #設定の取得    
     def apply_setting(self, selected_plan):
@@ -888,9 +907,6 @@ class ProductionEfficiencyApp(wx.Frame):
         self.selected_item = plan.get("item", "")
         self.cycle_time = int(plan.get("ct", ""))
         self.plan_num = int(plan.get("plan", 0))
-
-        self.selection_label.SetLabel(f"品番名：{self.selected_item}")
-        self.ct_display_label.SetLabel(f"CT：{self.cycle_time}秒")
         return True
     
     #ライン設定の反映        
@@ -926,14 +942,15 @@ class ProductionEfficiencyApp(wx.Frame):
             if not self.production_running:
                 wx.MessageBox("生産が開始されていません。", "生産未開始", wx.ICON_WARNING)
                 return
-           
+            
+            #ラインが選択されていない(生産が開始されていない場合)は処理しない
             if not self.selected_line:
                 return
             line = self.selected_line
             load_plan(self, line)
 
-            totalv = self.total_production - self.total_defproduction
-            rest = self.planday_num - totalv
+            self.total = self.total_production - self.total_defproduction
+            rest = self.planday_num - self.total
             ctl = int(self.cycle_time)
             prtime = self.planday_num * ctl
 
@@ -960,7 +977,7 @@ class ProductionEfficiencyApp(wx.Frame):
                     "作業者": self.worker_name,
                     "品番": self.selected_item,
                     "指示数": self.planday_num,
-                    "生産数": totalv,
+                    "生産数": self.total,
                     "差": rest,
                     "遅延分": delaym,
                     "遅延理由": reason,
@@ -973,6 +990,7 @@ class ProductionEfficiencyApp(wx.Frame):
                 
         dlg.Destroy()
         self.update_status_labels()
+        self.status_string()
     
     #詳細設定表示
     def on_show_statistics(self, event):
@@ -994,7 +1012,7 @@ class ProductionEfficiencyApp(wx.Frame):
             self.abnormal_pause = True
             self.production_paused = True
             wx.MessageBox("生産を一時停止しました。", "一時停止", wx.ICON_WARNING)
-            self.update_status_labels()
+            self.status_string()
 
     #稼働再開の処理        
     def on_abnormal_resume(self, event):
@@ -1002,7 +1020,7 @@ class ProductionEfficiencyApp(wx.Frame):
             self.abnormal_pause = False
             self.production_paused = False
             wx.MessageBox("生産を再開しました。", "稼働再開", wx.ICON_INFORMATION)
-            self.update_status_labels()
+            self.status_string()
             
     #非稼働時間の確認        
     def check_break_time(self):
@@ -1017,10 +1035,9 @@ class ProductionEfficiencyApp(wx.Frame):
                 duration = brk["duration_min"]
 
                 # 開始日時（曜日ベースで正確な日付に調整）
-                start_date = now.date()
-                days_diff = (weekday - brk_weekday) % 7
-                start_date -= datetime.timedelta(days=days_diff)
-                start_dt = datetime.datetime.combine(start_date, datetime.time(start_h, start_m))
+                days_diff = (brk_weekday - weekday) % 7
+                brk_date = now.date() + datetime.timedelta(days=days_diff)
+                start_dt = datetime.datetime.combine(brk_date, datetime.time(start_h, start_m))
 
                 # 終了日時（duration を分単位で加算）
                 end_dt = start_dt + datetime.timedelta(minutes=duration)
@@ -1039,6 +1056,11 @@ class ProductionEfficiencyApp(wx.Frame):
         now = datetime.datetime.now()
         self.time_label.SetLabel(f"現在時刻:{now.strftime('%H:%M:%S')}")
         self.now = now
+        progress_logic(self)
+
+        #稼働開始後の加算処理
+        if self.production_running and not self.production_paused and not self.abnormal_pause:
+            self.elapsed_seconds += 1
 
         #APIの定期呼び出し
         if self.production_running:
@@ -1051,7 +1073,7 @@ class ProductionEfficiencyApp(wx.Frame):
                     print(f"API送信エラー: {e}")    
             
             #時系列データ用API呼び出し
-            if self.api_timer % 1200 == 0:
+            if self.api_timer % 1200 == 0: #20分ごと
                 product_log(self)
                 try:
                     send_log(self)
@@ -1061,25 +1083,15 @@ class ProductionEfficiencyApp(wx.Frame):
         #稼働外時間の処理
         if self.check_break_time():
             self.production_paused = True
+            self.status_string()
         else:
            if self.production_paused:
                self.total_min = self.break_min(start=True)
-               self.production_paused = False              
-        
-        #稼働開始後の加算処理
-        if self.production_running and not self.production_paused and not self.abnormal_pause:
-            self.elapsed_seconds += 1
-        
-        #CSVの時間計測
-        if self.production_running and not self.production_started:
-            self.production_started = True
-            self.collect_start_time = now
-            self.last_csv_collect_time = now
-        elif not self.production_running:
-            self.production_started = False
+               self.production_paused = False
+               self.status_string()             
 
         # 1時間ごとのCSV収集
-        if self.production_running and self.last_csv_collect_time:
+        if self.production_running and self.production_started:
             if (now - self.last_csv_collect_time).total_seconds() >= 3600:
                 collect_csv_row(self)
                 self.last_csv_collect_time = now
@@ -1090,7 +1102,6 @@ class ProductionEfficiencyApp(wx.Frame):
     #表示画面の更新処理    
     def update_status_labels(self):
         now = datetime.datetime.now()
-        total = 0
         self.worker_label.SetLabel(f"作業者：{self.worker_name if self.worker_name else '未登録'}")
         
         #計画選択後のセット
@@ -1105,30 +1116,14 @@ class ProductionEfficiencyApp(wx.Frame):
         
         #計画がセットされ生産が始まったら    
         if self.production_running and self.selected_item:
-            try:
-                ctl = int(self.cycle_time)
-            except (ValueError, TypeError):
-                ctl = 1
-
-            ct = ctl if  ctl > 0 else 1
-            elapsed = max(0, self.elapsed_seconds)
-            
-            total= self.total_production-self.total_defproduction
-            remaining=self.planday_num - total
-            #ctr = ct*1.25
-            
-            worktime=(remaining*ct)/3600
-            time_end = now + datetime.timedelta(hours=worktime) + datetime.timedelta(minutes=self.total_min)
+            #残りの予想作業時間
+            time_end = now + datetime.timedelta(hours=self.worktime) + datetime.timedelta(minutes=self.total_min)
             last_str = time_end.strftime("%H:%M")
-            target_progress =int(elapsed/ct)
-            target_progress = min(target_progress, self.planday_num)
-            self.progress = int(elapsed/ct)
             self.ltime_value.SetLabel(f"{last_str}")            
 
-            diff = total - target_progress
-            self.diff_value.SetLabel(f"{diff}")
+            self.diff_value.SetLabel(f"{self.diff}")
             
-            if  total < target_progress:
+            if  self.total < self.progress:
                 self.diff_value.SetForegroundColour("#B22222")
             else:
                 self.diff_value.SetForegroundColour("#CCCCCC")
@@ -1139,9 +1134,10 @@ class ProductionEfficiencyApp(wx.Frame):
             self.diff_value.SetForegroundColour("#CCCCCC")
             self.ltime_value.SetLabel(f"{now.strftime('%H:%M')}")
         self.diff_value.Refresh()    
-        self.total_value.SetLabel(f"{total}")
+        self.total_value.SetLabel(f"{self.total}")
         
-        #生産状態の表記  
+    #生産状態の表記
+    def status_string(self):    
         if self.production_running:
             if self.abnormal_pause:
                 status_str = "異常停止中"
